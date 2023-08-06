@@ -21,8 +21,10 @@ public class FloatDotProductBenchmark {
 
   private float[] a;
   private float[] b;
+  private FloatVector[] aVector;
+  static final VectorSpecies<Float> SPECIES = FloatVector.SPECIES_PREFERRED;
 
-  @Param({"1", "4", "6", "8", "13", "16", "25", "32", "64", "100", "128", "207", "256", "300", "512", "702", "1024"})
+  @Param({"1024"})
   //@Param({"1", "4", "6", "8", "13", "16", "25", "32", "64", "100" })
   //@Param({"702", "1024"})
   //@Param({"16", "32", "64"})
@@ -36,9 +38,15 @@ public class FloatDotProductBenchmark {
       a[i] = ThreadLocalRandom.current().nextFloat();
       b[i] = ThreadLocalRandom.current().nextFloat();
     }
+    int i = 0;
+    int upperBound = SPECIES.loopBound(a.length);
+    aVector = new FloatVector[upperBound / SPECIES.length()];
+    int vecIndex = 0;
+    for (; i < upperBound; i += SPECIES.length()) {
+      aVector[vecIndex++] = FloatVector.fromArray(SPECIES, a, i);
+    }
   }
 
-  static final VectorSpecies<Float> SPECIES = FloatVector.SPECIES_PREFERRED;
 
   @Benchmark
   public float dotProductNew() {
@@ -89,15 +97,64 @@ public class FloatDotProductBenchmark {
   }
 
   @Benchmark
-  public float dotProductOld() {
+  public float dotProductPreAllocated() {
+    if (a.length != b.length) {
+      throw new IllegalArgumentException("vector dimensions differ: " + a.length + "!=" + b.length);
+    }
+    int i = 0;
+    float res = 0;
+    // if the array size is large (> 2x platform vector size), its worth the overhead to vectorize
+    if (a.length > 2 * SPECIES.length()) {
+      // vector loop is unrolled 4x (4 accumulators in parallel)
+      FloatVector acc1 = FloatVector.zero(SPECIES);
+      FloatVector acc2 = FloatVector.zero(SPECIES);
+      FloatVector acc3 = FloatVector.zero(SPECIES);
+      FloatVector acc4 = FloatVector.zero(SPECIES);
+      int upperBound = SPECIES.loopBound(a.length - 3*SPECIES.length());
+      int vectorIndex = 0;
+      for (; i < upperBound; i += 4 * SPECIES.length(), vectorIndex += 4) {
+        FloatVector va = aVector[vectorIndex];
+        FloatVector vb = FloatVector.fromArray(SPECIES, b, i);
+        acc1 = acc1.add(va.mul(vb));
+        FloatVector vc = aVector[vectorIndex + 1];
+        FloatVector vd = FloatVector.fromArray(SPECIES, b, i + SPECIES.length());
+        acc2 = acc2.add(vc.mul(vd));
+        FloatVector ve = aVector[vectorIndex + 2];
+        FloatVector vf = FloatVector.fromArray(SPECIES, b, i + 2*SPECIES.length());
+        acc3 = acc3.add(ve.mul(vf));
+        FloatVector vg = aVector[vectorIndex + 3];
+        FloatVector vh = FloatVector.fromArray(SPECIES, b, i + 3*SPECIES.length());
+        acc4 = acc4.add(vg.mul(vh));
+      }
+      // vector tail: less scalar computations for unaligned sizes, esp with big vector sizes
+      upperBound = SPECIES.loopBound(a.length);
+      for (; i < upperBound; i += SPECIES.length(), vectorIndex++) {
+        FloatVector va = aVector[vectorIndex];
+        FloatVector vb = FloatVector.fromArray(SPECIES, b, i);
+        acc1 = acc1.add(va.mul(vb));
+      }
+      // reduce
+      FloatVector res1 = acc1.add(acc2);
+      FloatVector res2 = acc3.add(acc4);
+      res += res1.add(res2).reduceLanes(VectorOperators.ADD);
+    }
+
+    for (; i < a.length; i++) {
+      res += b[i] * a[i];
+    }
+    return res;
+  }
+
+  //@Benchmark
+  /*public float dotProductOld() {
     if (a.length != b.length) {
       throw new IllegalArgumentException("vector dimensions differ: " + a.length + "!=" + b.length);
     }
     float res = 0f;
-    /*
+    *//*
      * If length of vector is larger than 8, we use unrolled dot product to accelerate the
      * calculation.
-     */
+     *//*
     int i;
     for (i = 0; i < a.length % 8; i++) {
       res += b[i] * a[i];
@@ -155,5 +212,5 @@ public class FloatDotProductBenchmark {
               + b[i + 7] * a[i + 7];
     }
     return res;
-  }
+  }*/
 }
